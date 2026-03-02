@@ -87,6 +87,15 @@
             var activeMesh = "box";
             var humanRoots = {};
             var meshBtns = {};
+            var isLoading = false;
+            var loadingText = null; // created later in GUI section
+
+            function setButtonsEnabled(enabled) {
+                Object.keys(meshBtns).forEach(function (k) {
+                    meshBtns[k].alpha = enabled ? 1.0 : 0.4;
+                    meshBtns[k].isHitTestVisible = enabled;
+                });
+            }
 
             // ── Painter's Light Shader ──────────────────────────────────
             BABYLON.Effect.ShadersStore["paintersLightVertexShader"] = "\
@@ -159,6 +168,7 @@
 
             // ── Mesh Selection & Human Model Loading ────────────────
             function selectMesh(name) {
+                if (isLoading) return;
                 Object.keys(meshes).forEach(function (k) { meshes[k].setEnabled(false); });
                 Object.keys(humanRoots).forEach(function (k) { humanRoots[k].setEnabled(false); });
                 if (meshes[name]) meshes[name].setEnabled(true);
@@ -170,7 +180,11 @@
             }
 
             function loadHumanModel(name, rootUrl, fileName) {
+                if (isLoading) return;
                 if (humanRoots[name]) { selectMesh(name); return; }
+                isLoading = true;
+                setButtonsEnabled(false);
+                if (loadingText) loadingText.isVisible = true;
                 BABYLON.SceneLoader.ImportMesh("", rootUrl, fileName, scene, function (importedMeshes) {
                     scene.animationGroups.forEach(function (ag) { ag.stop(); });
                     var container = new BABYLON.TransformNode(name + "_root", scene);
@@ -224,7 +238,15 @@
                     }
                     container.parent = parent;
                     humanRoots[name] = container;
+                    isLoading = false;
+                    setButtonsEnabled(true);
+                    if (loadingText) loadingText.isVisible = false;
                     selectMesh(name);
+                }, null, function () {
+                    // on error
+                    isLoading = false;
+                    setButtonsEnabled(true);
+                    if (loadingText) loadingText.isVisible = false;
                 });
             }
 
@@ -297,6 +319,15 @@
 
             // ── GUI ─────────────────────────────────────────────────────
             var advTex = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI("UI");
+
+            // Loading overlay
+            loadingText = new BABYLON.GUI.TextBlock("loadingText", "Loading...");
+            loadingText.color = "#00d4ff"; loadingText.fontSize = 28;
+            loadingText.fontWeight = "bold";
+            loadingText.textHorizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+            loadingText.textVerticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+            loadingText.isVisible = false;
+            advTex.addControl(loadingText);
 
             var panelVisible = true;
             var toggleBtn = BABYLON.GUI.Button.CreateSimpleButton("toggleBtn", "\u2699");
