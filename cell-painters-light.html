@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>2g-flat. Cel Shading — Painter's Planar Light (Flat Surface Bands) — Illumination Models</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        html,
+        body {
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0
+        }
+
+        #renderCanvas {
+            width: 100%;
+            height: 100%;
+            touch-action: none
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="renderCanvas"></canvas>
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
+    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+    <script>
+        /*  =============================================================
+            2g-flat.  CEL SHADING — PAINTER'S PLANAR LIGHT
+                      with FLAT-SURFACE BAND STRIPES
+            =============================================================
+            Same as 2g but adds automatic flat-surface detection:
+
+            On faces where the normal is constant (box faces, wall
+            segments), all fragments get the same NdotL → single
+            solid colour.  This version detects that and injects a
+            spatial gradient along the light direction so cel bands
+            appear as parallel stripes across the face.
+
+            On curved surfaces (sphere, human models) the gradient
+            has no effect — banding comes naturally from varying NdotL.
+
+            Bug-fix vs earlier version:
+            dFdx/dFdy of normals are in *screen-pixel* units and
+            change with zoom level.  We normalise them by the
+            position derivatives to get a camera-independent
+            curvature measure (normal change per world-space unit).
+
+            Copy everything inside createScene into the Babylon.js
+            Playground at https://playground.babylonjs.com
+            ============================================================= */
+        var canvas = document.getElementById("renderCanvas");
+        var engine = new BABYLON.Engine(canvas, true);
+
+        var createScene = function () {
+            var scene = new BABYLON.Scene(engine);
+            scene.clearColor = new BABYLON.Color4(0.05, 0.05, 0.1, 1);
+
+            // ── Camera ──────────────────────────────────────────────────
+            var camera = new BABYLON.ArcRotateCamera("cam",
+                -Math.PI / 4, Math.PI / 3, 7, BABYLON.Vector3.Zero(), scene);
+            camera.attachControl(canvas, true);
+            camera.lowerRadiusLimit = 1;
+            camera.upperRadiusLimit = 20;
+            camera.wheelPrecision = 30;
+
+            // ── Meshes ──────────────────────────────────────────────────
+            var parent = new BABYLON.TransformNode("parent", scene);
+            var meshes = {
+                box: BABYLON.MeshBuilder.CreateBox("box", { size: 1 }, scene),
+                sphere: BABYLON.MeshBuilder.CreateSphere("sphere", { diameter: 1.1, segments: 32 }, scene),
+                cylinder: BABYLON.MeshBuilder.CreateCylinder("cyl", { height: 1, diameter: 1, tessellation: 32 }, scene)
+            };
+            Object.keys(meshes).forEach(function (k) { meshes[k].parent = parent; });
+            meshes.sphere.setEnabled(false);
+            meshes.cylinder.setEnabled(false);
+            var activeMesh = "box";
+            var humanRoots = {};
+            var meshBtns = {};
+
+            // ── Cel + Painter's Light Shader (flat-surface aware) ───────
+            BABYLON.Effect.ShadersStore["celPainterFlatVertexShader"] = "\
+        precision highp float;\
+        attribute vec3 position;\
+        attribute vec3 normal;\
+        uniform mat4 world;\
+        uniform mat4 worldViewProjection;\
+        varying vec3 vNormalW;\
+        varying vec3 vPositionW;\
+        void main(){\
+            vNormalW    = normalize((world * vec4(normal, 0.0)).xyz);\
+            vPositionW  = (world * vec4(position, 1.0)).xyz;\
+            gl_Position = worldViewProjection * vec4(position, 1.0);\
+        }";
+
+            BABYLON.Effect.ShadersStore["celPainterFlatFragmentShader"] = "\
+        #extension GL_OES_standard_derivatives : enable\n\
+        precision highp float;\
+        uniform vec3  uLightDir;\
+        uniform vec3  uLightColor;\
+        uniform vec3  uDiffuse;\
+        uniform vec3  uAmbient;\
+        uniform float uLightIntensity;\
+        uniform float uAmbientIntensity;\
+        uniform float uWrap;\
+        uniform float uBands;\
+        uniform float uPlaneDist;\
+        uniform float uFalloff;\
+        varying vec3  vNormalW;\
+        varying vec3  vPositionW;\
+        void main(){\
+            vec3 N = normalize(vNormalW);\
+            vec3 L = normalize(uLightDir);\
+            \
+            /* --- wrapped diffuse (Half-Lambert) --- */\n\
+            float NdotL   = dot(N, L);\
+            float diffuse = max((NdotL + uWrap) / (1.0 + uWrap), 0.0);\
+            \
+            /* --- flat vs curved surface detection --- */\n\
+            /* Measure normal change per world-space unit,         */\n\
+            /* NOT per pixel, so it stays stable when the camera   */\n\
+            /* zooms in/out.                                       */\n\
+            float normalVar = length(dFdx(N)) + length(dFdy(N));\
+            float posVar    = length(dFdx(vPositionW)) + length(dFdy(vPositionW));\
+            float curvature = normalVar / max(posVar, 0.0001);\
+            float flatness  = 1.0 - smoothstep(0.0, 0.5, curvature);\
+            \
+            /* On flat faces, project L onto the face plane and   */\n\
+            /* add a position-based ramp AROUND the true diffuse   */\n\
+            /* value so bands stay centered on the correct          */\n\
+            /* brightness — lit faces never go black.               */\n\
+            /* On curves flatness ≈ 0 → no effect.              */\n\
+            vec3  flatL   = L - N * dot(L, N);\
+            float flatLen = length(flatL);\
+            vec3  flatDir = flatLen > 0.001 ? flatL / flatLen : L;\
+            float ramp    = clamp(diffuse + dot(vPositionW, flatDir) * 0.5, 0.0, 1.0);\
+            float combined = mix(diffuse, ramp, flatness);\
+            \
+            /* --- cel / banded quantisation --- */\n\
+            float banded = floor(combined * uBands + 0.0001) / uBands;\
+            \
+            /* --- planar distance attenuation --- */\n\
+            float depth = max(uPlaneDist - dot(vPositionW, L), 0.0);\
+            float atten = 1.0 / (1.0 + uFalloff * depth * depth);\
+            \
+            vec3 color = uAmbient * uAmbientIntensity\
+                       + uDiffuse * uLightColor * banded * atten * uLightIntensity;\
+            gl_FragColor = vec4(color, 1.0);\
+        }";
+
+            var meshColor = new BABYLON.Color3(0.9, 0.25, 0.35);
+            var mat = new BABYLON.ShaderMaterial("celPainterFlatMat", scene,
+                { vertex: "celPainterFlat", fragment: "celPainterFlat" },
+                {
+                    attributes: ["position", "normal"],
+                    uniforms: ["world", "worldViewProjection",
+                        "uLightDir", "uLightColor", "uDiffuse", "uAmbient",
+                        "uLightIntensity", "uAmbientIntensity", "uWrap",
+                        "uBands", "uPlaneDist", "uFalloff"]
+                });
+            mat.setColor3("uDiffuse", meshColor);
+            mat.setColor3("uLightColor", new BABYLON.Color3(1, 1, 1));
+            mat.setColor3("uAmbient", new BABYLON.Color3(0.06, 0.04, 0.08));
+            mat.setFloat("uLightIntensity", 4.0);
+            mat.setFloat("uAmbientIntensity", 1.0);
+            mat.setFloat("uWrap", 1.0);
+            mat.setFloat("uBands", 10.0);
+            mat.setFloat("uPlaneDist", 2.0);
+            mat.setFloat("uFalloff", 1.0);
+            mat.backFaceCulling = true;
+            Object.keys(meshes).forEach(function (k) { meshes[k].material = mat; });
+
+            // ── Mesh Selection & Human Model Loading ────────────────
+            function selectMesh(name) {
+                Object.keys(meshes).forEach(function (k) { meshes[k].setEnabled(false); });
+                Object.keys(humanRoots).forEach(function (k) { humanRoots[k].setEnabled(false); });
+                if (meshes[name]) meshes[name].setEnabled(true);
+                else if (humanRoots[name]) humanRoots[name].setEnabled(true);
+                activeMesh = name;
+                Object.keys(meshBtns).forEach(function (k) {
+                    meshBtns[k].background = k === name ? "#e94560" : "#222244";
+                });
+            }
+
+            function loadHumanModel(name, rootUrl, fileName) {
+                if (humanRoots[name]) { selectMesh(name); return; }
+                BABYLON.SceneLoader.ImportMesh("", rootUrl, fileName, scene, function (importedMeshes) {
+                    scene.animationGroups.forEach(function (ag) { ag.stop(); });
+                    var container = new BABYLON.TransformNode(name + "_root", scene);
+                    var bakedMeshes = [];
+                    importedMeshes.forEach(function (m, i) {
+                        if (!m.getTotalVertices || m.getTotalVertices() === 0) return;
+                        var positions = m.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+                        var normals = m.getVerticesData(BABYLON.VertexBuffer.NormalKind);
+                        var indices = m.getIndices();
+                        if (!positions || !normals || !indices) return;
+                        // Reverse triangle winding for GLB files (coordinate-system flip)
+                        if (fileName.match(/\.gl(b|tf)$/i)) {
+                            for (var j = 0; j < indices.length; j += 3) {
+                                var tmp = indices[j + 1];
+                                indices[j + 1] = indices[j + 2];
+                                indices[j + 2] = tmp;
+                            }
+                        }
+                        var baked = new BABYLON.Mesh(name + "_baked_" + i, scene);
+                        var vd = new BABYLON.VertexData();
+                        vd.positions = positions;
+                        vd.normals = normals;
+                        vd.indices = indices;
+                        vd.applyToMesh(baked);
+                        baked.material = mat;
+                        baked.parent = container;
+                        bakedMeshes.push(baked);
+                    });
+                    importedMeshes.forEach(function (m) { m.dispose(); });
+                    scene.transformNodes.slice().forEach(function (tn) {
+                        if (tn.name && (tn.name.indexOf("mixamorig") >= 0 || tn.name === "Idle" || tn.name === "HVGirl")) tn.dispose();
+                    });
+                    var min = null, max = null;
+                    bakedMeshes.forEach(function (m) {
+                        m.computeWorldMatrix(true);
+                        var bi = m.getBoundingInfo();
+                        var bmin = bi.boundingBox.minimumWorld;
+                        var bmax = bi.boundingBox.maximumWorld;
+                        if (!min) { min = bmin.clone(); max = bmax.clone(); }
+                        else { min = BABYLON.Vector3.Minimize(min, bmin); max = BABYLON.Vector3.Maximize(max, bmax); }
+                    });
+                    if (min && max) {
+                        var size = max.subtract(min);
+                        var maxDim = Math.max(size.x, size.y, size.z);
+                        if (maxDim > 0) {
+                            var s = 2.2 / maxDim;
+                            container.scaling = new BABYLON.Vector3(s, s, s);
+                            var center = min.add(max).scale(0.5);
+                            container.position = center.scale(-s);
+                        }
+                    }
+                    container.parent = parent;
+                    humanRoots[name] = container;
+                    selectMesh(name);
+                });
+            }
+
+            // ── Light & Plane Indicator ─────────────────────────────────
+            var lightAzimuth = 45;
+            var lightElevation = 30;
+            var planeDist = 2.0;
+
+            // Dummy Babylon light
+            var light = new BABYLON.DirectionalLight("dir",
+                new BABYLON.Vector3(0, -1, 0), scene);
+            light.intensity = 0;
+
+            // Semi-transparent plane + grid indicator
+            var planeAnchor = new BABYLON.TransformNode("planeAnchor", scene);
+
+            var planeIndicator = BABYLON.MeshBuilder.CreatePlane("lightPlane",
+                { size: 5 }, scene);
+            var planeMat = new BABYLON.StandardMaterial("planeMat", scene);
+            planeMat.emissiveColor = new BABYLON.Color3(1, 1, 0.3);
+            planeMat.alpha = 0.12;
+            planeMat.disableLighting = true;
+            planeMat.backFaceCulling = false;
+            planeIndicator.material = planeMat;
+            planeIndicator.parent = planeAnchor;
+
+            var gridLines;
+            (function buildLocalGrid() {
+                var lines = [];
+                var halfSize = 2.5;
+                var steps = 6;
+                for (var i = 0; i <= steps; i++) {
+                    var t = -halfSize + (i / steps) * halfSize * 2;
+                    lines.push([
+                        new BABYLON.Vector3(t, -halfSize, 0),
+                        new BABYLON.Vector3(t, halfSize, 0)
+                    ]);
+                    lines.push([
+                        new BABYLON.Vector3(-halfSize, t, 0),
+                        new BABYLON.Vector3(halfSize, t, 0)
+                    ]);
+                }
+                gridLines = BABYLON.MeshBuilder.CreateLineSystem("planeGrid",
+                    { lines: lines }, scene);
+                gridLines.color = new BABYLON.Color3(1, 1, 0.3);
+                gridLines.alpha = 0.2;
+                gridLines.parent = planeAnchor;
+            })();
+
+            function updateLight() {
+                var az = lightAzimuth * Math.PI / 180;
+                var el = lightElevation * Math.PI / 180;
+                var fromDir = new BABYLON.Vector3(
+                    Math.cos(el) * Math.sin(az),
+                    Math.sin(el),
+                    Math.cos(el) * Math.cos(az));
+                mat.setVector3("uLightDir", fromDir.clone());
+                mat.setFloat("uPlaneDist", planeDist);
+
+                var planeCenter = fromDir.scale(planeDist);
+                planeAnchor.position = planeCenter;
+                planeAnchor.lookAt(planeCenter.add(fromDir));
+
+                light.direction = fromDir.scale(-1);
+            }
+            updateLight();
+
+            // ── GUI ─────────────────────────────────────────────────────
+            var advTex = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI("UI");
+
+            var panelVisible = true;
+            var toggleBtn = BABYLON.GUI.Button.CreateSimpleButton("toggleBtn", "\u2699");
+            toggleBtn.width = "40px"; toggleBtn.height = "40px"; toggleBtn.fontSize = 22;
+            toggleBtn.color = "#ccc"; toggleBtn.background = "rgba(10,10,30,0.85)";
+            toggleBtn.cornerRadius = 8; toggleBtn.thickness = 0;
+            toggleBtn.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+            toggleBtn.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+            toggleBtn.paddingTop = "10px"; toggleBtn.paddingRight = "10px";
+            toggleBtn.isVisible = false;
+            advTex.addControl(toggleBtn);
+
+            var scrollViewer = new BABYLON.GUI.ScrollViewer();
+            scrollViewer.width = "260px"; scrollViewer.height = "95%";
+            scrollViewer.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+            scrollViewer.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+            scrollViewer.paddingTop = "10px"; scrollViewer.paddingRight = "10px";
+            scrollViewer.background = "rgba(10,10,30,0.85)";
+            scrollViewer.barSize = 8; scrollViewer.barColor = "#e94560";
+            scrollViewer.barBackground = "#222244"; scrollViewer.thickness = 0;
+            advTex.addControl(scrollViewer);
+
+            var hideBtn = BABYLON.GUI.Button.CreateSimpleButton("hideBtn", "\u2715  Hide Panel");
+            hideBtn.height = "30px"; hideBtn.width = "220px"; hideBtn.fontSize = 12;
+            hideBtn.color = "#ccc"; hideBtn.background = "#222244";
+            hideBtn.cornerRadius = 4; hideBtn.thickness = 0;
+            hideBtn.paddingTop = "6px";
+
+            function togglePanel() {
+                panelVisible = !panelVisible;
+                scrollViewer.isVisible = panelVisible;
+                toggleBtn.isVisible = !panelVisible;
+            }
+            hideBtn.onPointerClickObservable.add(togglePanel);
+            toggleBtn.onPointerClickObservable.add(togglePanel);
+
+            var panel = new BABYLON.GUI.StackPanel();
+            panel.width = "240px"; panel.isVertical = true;
+            panel.adaptHeightToChildren = true;
+            scrollViewer.addControl(panel);
+
+            function makeLabel(text) {
+                var t = new BABYLON.GUI.TextBlock(); t.text = text; t.color = "#999"; t.fontSize = 11;
+                t.height = "22px"; t.textHorizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+                t.paddingLeft = "6px"; t.paddingTop = "6px"; return t;
+            }
+            function makeSlider(min, max, value, onChange) {
+                var s = new BABYLON.GUI.Slider();
+                s.minimum = min; s.maximum = max; s.value = value;
+                s.height = "20px"; s.width = "220px"; s.color = "#e94560"; s.background = "#333";
+                s.thumbWidth = 14; s.paddingLeft = "6px"; s.paddingRight = "6px";
+                s.onValueChangedObservable.add(onChange); return s;
+            }
+            function makeValueLabel(initial) {
+                var t = new BABYLON.GUI.TextBlock(); t.text = initial; t.color = "#00d4ff"; t.fontSize = 11;
+                t.height = "16px"; t.textHorizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+                t.paddingRight = "10px"; return t;
+            }
+
+            panel.addControl(hideBtn);
+
+            // Mesh buttons
+            panel.addControl(makeLabel("MESH SHAPE"));
+            var btnGrid = new BABYLON.GUI.StackPanel();
+            btnGrid.isVertical = false; btnGrid.height = "30px"; btnGrid.width = "230px"; btnGrid.paddingLeft = "4px";
+            ["box", "sphere", "cylinder"].forEach(function (t) {
+                var b = BABYLON.GUI.Button.CreateSimpleButton("btn_" + t, t.charAt(0).toUpperCase() + t.slice(1));
+                b.width = "74px"; b.height = "26px"; b.fontSize = 11;
+                b.color = "#ccc"; b.background = t === activeMesh ? "#e94560" : "#222244";
+                b.cornerRadius = 4; b.thickness = 1;
+                b.onPointerClickObservable.add(function () { selectMesh(t); });
+                meshBtns[t] = b; btnGrid.addControl(b);
+            });
+            panel.addControl(btnGrid);
+            var btnGrid2 = new BABYLON.GUI.StackPanel();
+            btnGrid2.isVertical = false; btnGrid2.height = "30px"; btnGrid2.width = "230px"; btnGrid2.paddingLeft = "4px";
+            var bMan = BABYLON.GUI.Button.CreateSimpleButton("btn_man", "Man");
+            bMan.width = "112px"; bMan.height = "26px"; bMan.fontSize = 11;
+            bMan.color = "#ccc"; bMan.background = "#222244";
+            bMan.cornerRadius = 4; bMan.thickness = 1;
+            bMan.onPointerClickObservable.add(function () {
+                loadHumanModel("man", "https://playground.babylonjs.com/scenes/", "dummy3.babylon");
+            });
+            meshBtns["man"] = bMan; btnGrid2.addControl(bMan);
+            panel.addControl(btnGrid2);
+            var btnGrid3 = new BABYLON.GUI.StackPanel();
+            btnGrid3.isVertical = false; btnGrid3.height = "30px"; btnGrid3.width = "230px"; btnGrid3.paddingLeft = "4px";
+            var bMaleFace = BABYLON.GUI.Button.CreateSimpleButton("btn_maleFace", "Male Face");
+            bMaleFace.width = "112px"; bMaleFace.height = "26px"; bMaleFace.fontSize = 11;
+            bMaleFace.color = "#ccc"; bMaleFace.background = "#222244";
+            bMaleFace.cornerRadius = 4; bMaleFace.thickness = 1;
+            bMaleFace.onPointerClickObservable.add(function () {
+                loadHumanModel("maleFace", "models/", "head.OBJ");
+            });
+            meshBtns["maleFace"] = bMaleFace; btnGrid3.addControl(bMaleFace);
+            var bFemaleFace = BABYLON.GUI.Button.CreateSimpleButton("btn_femaleFace", "Female Face");
+            bFemaleFace.width = "112px"; bFemaleFace.height = "26px"; bFemaleFace.fontSize = 11;
+            bFemaleFace.color = "#ccc"; bFemaleFace.background = "#222244";
+            bFemaleFace.cornerRadius = 4; bFemaleFace.thickness = 1;
+            bFemaleFace.onPointerClickObservable.add(function () {
+                loadHumanModel("femaleFace", "models/", "Emily_2_1.obj");
+            });
+            meshBtns["femaleFace"] = bFemaleFace; btnGrid3.addControl(bFemaleFace);
+            panel.addControl(btnGrid3);
+
+            // Color picker
+            panel.addControl(makeLabel("MESH COLOR"));
+            var picker = new BABYLON.GUI.ColorPicker();
+            picker.value = meshColor; picker.height = "120px"; picker.width = "120px"; picker.paddingTop = "4px";
+            picker.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+            picker.onValueChangedObservable.add(function (c) {
+                meshColor = c;
+                mat.setColor3("uDiffuse", new BABYLON.Color3(c.r, c.g, c.b));
+            });
+            panel.addControl(picker);
+
+            // Light color
+            panel.addControl(makeLabel("LIGHT COLOR"));
+            var lightPicker = new BABYLON.GUI.ColorPicker();
+            lightPicker.value = new BABYLON.Color3(1, 1, 1);
+            lightPicker.height = "80px"; lightPicker.width = "80px"; lightPicker.paddingTop = "4px";
+            lightPicker.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+            lightPicker.onValueChangedObservable.add(function (c) {
+                mat.setColor3("uLightColor", new BABYLON.Color3(c.r, c.g, c.b));
+                planeMat.emissiveColor = new BABYLON.Color3(c.r, c.g, c.b);
+                if (gridLines) gridLines.color = new BABYLON.Color3(c.r, c.g, c.b);
+            });
+            panel.addControl(lightPicker);
+
+            // Ambient color
+            panel.addControl(makeLabel("AMBIENT COLOR"));
+            var ambPicker = new BABYLON.GUI.ColorPicker();
+            ambPicker.value = new BABYLON.Color3(0.06, 0.04, 0.08);
+            ambPicker.height = "80px"; ambPicker.width = "80px"; ambPicker.paddingTop = "4px";
+            ambPicker.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+            ambPicker.onValueChangedObservable.add(function (c) {
+                mat.setColor3("uAmbient", new BABYLON.Color3(c.r, c.g, c.b));
+            });
+            panel.addControl(ambPicker);
+
+            // ★ BANDS — cel shading steps
+            panel.addControl(makeLabel("BANDS (cel steps)"));
+            var bandVal = makeValueLabel("10"); panel.addControl(bandVal);
+            panel.addControl(makeSlider(2, 32, 10, function (v) {
+                var b = Math.round(v);
+                mat.setFloat("uBands", b); bandVal.text = String(b);
+            }));
+
+            // PLANE DISTANCE
+            panel.addControl(makeLabel("LIGHT PLANE DISTANCE"));
+            var pdVal = makeValueLabel("2.0"); panel.addControl(pdVal);
+            panel.addControl(makeSlider(1, 15, 2, function (v) {
+                planeDist = v; mat.setFloat("uPlaneDist", v);
+                updateLight(); pdVal.text = v.toFixed(1);
+            }));
+
+            // DISTANCE FALLOFF
+            panel.addControl(makeLabel("DISTANCE FALLOFF"));
+            var foVal = makeValueLabel("1.00"); panel.addControl(foVal);
+            panel.addControl(makeSlider(0, 5, 1.0, function (v) {
+                mat.setFloat("uFalloff", v); foVal.text = v.toFixed(2);
+            }));
+
+            // WRAP slider
+            panel.addControl(makeLabel("WRAP (0=Lambert, 1=Half)"));
+            var wrapVal = makeValueLabel("1.00"); panel.addControl(wrapVal);
+            panel.addControl(makeSlider(0, 1, 1, function (v) {
+                mat.setFloat("uWrap", v); wrapVal.text = v.toFixed(2);
+            }));
+
+            // Light intensity
+            panel.addControl(makeLabel("LIGHT INTENSITY"));
+            var liVal = makeValueLabel("4.00"); panel.addControl(liVal);
+            panel.addControl(makeSlider(0, 10, 4, function (v) {
+                mat.setFloat("uLightIntensity", v); liVal.text = v.toFixed(2);
+            }));
+
+            // Ambient intensity
+            panel.addControl(makeLabel("AMBIENT INTENSITY"));
+            var aiVal = makeValueLabel("1.00"); panel.addControl(aiVal);
+            panel.addControl(makeSlider(0, 3, 1, function (v) {
+                mat.setFloat("uAmbientIntensity", v); aiVal.text = v.toFixed(2);
+            }));
+
+            // Light direction (azimuth)
+            panel.addControl(makeLabel("LIGHT DIRECTION (horizontal)"));
+            var laVal = makeValueLabel("45°"); panel.addControl(laVal);
+            panel.addControl(makeSlider(0, 360, 45, function (v) {
+                lightAzimuth = v; updateLight(); laVal.text = Math.round(v) + "°";
+            }));
+
+            // Light direction (elevation)
+            panel.addControl(makeLabel("LIGHT DIRECTION (vertical)"));
+            var leVal = makeValueLabel("30°"); panel.addControl(leVal);
+            panel.addControl(makeSlider(-90, 90, 30, function (v) {
+                lightElevation = v; updateLight(); leVal.text = Math.round(v) + "°";
+            }));
+
+            // Rotations
+            ["X", "Y", "Z"].forEach(function (axis) {
+                panel.addControl(makeLabel("ROTATION " + axis));
+                var val = makeValueLabel("0°"); panel.addControl(val);
+                panel.addControl(makeSlider(0, 360, 0, function (v) {
+                    parent.rotation[axis.toLowerCase()] = v * Math.PI / 180;
+                    val.text = Math.round(v) + "°";
+                }));
+            });
+
+            return scene;
+        };
+
+        var scene = createScene();
+        engine.runRenderLoop(function () { scene.render(); });
+        window.addEventListener("resize", function () { engine.resize(); });
+    </script>
+</body>
+
+</html>
