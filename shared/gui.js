@@ -114,15 +114,33 @@ PaintersIllumination.createGUI = function (ctx, lightCtx, sliderDefs) {
     advTex.addControl(scrollViewer);
 
     // ── Block wheel events from zooming the camera while over the panel ──
-    // The camera's mouse-wheel input is a direct DOM listener on the canvas,
-    // so we must detach it while the pointer is over the GUI panel.
+    // In the capture phase, if the wheel is over the scroll viewer, temporarily
+    // detach the camera's wheel input so it won't zoom.  The event still
+    // propagates normally so the Babylon GUI scroll viewer can handle it.
+    // The camera input is reattached on the next animation frame.
     var wheelInput = ctx.camera.inputs.attached.mousewheel;
-    scrollViewer.onPointerEnterObservable.add(function () {
-        if (wheelInput) wheelInput.detachControl();
-    });
-    scrollViewer.onPointerOutObservable.add(function () {
-        if (wheelInput) wheelInput.attachControl(ctx.canvas);
-    });
+    var reattachPending = false;
+    ctx.canvas.addEventListener("wheel", function (evt) {
+        if (!scrollViewer.isVisible || !wheelInput) return;
+        var m = scrollViewer._currentMeasure;
+        if (!m) return;
+        var rect = ctx.canvas.getBoundingClientRect();
+        var scaleX = ctx.canvas.width / rect.width;
+        var scaleY = ctx.canvas.height / rect.height;
+        var px = (evt.clientX - rect.left) * scaleX;
+        var py = (evt.clientY - rect.top) * scaleY;
+        if (px >= m.left && px <= m.left + m.width &&
+            py >= m.top  && py <= m.top  + m.height) {
+            wheelInput.detachControl();
+            if (!reattachPending) {
+                reattachPending = true;
+                requestAnimationFrame(function () {
+                    wheelInput.attachControl(ctx.canvas);
+                    reattachPending = false;
+                });
+            }
+        }
+    }, { capture: true });
 
     var hideBtn = BABYLON.GUI.Button.CreateSimpleButton("hideBtn", "\u2715  Hide Panel");
     hideBtn.height = "30px"; hideBtn.width = "220px"; hideBtn.fontSize = 12;
@@ -191,6 +209,21 @@ PaintersIllumination.createGUI = function (ctx, lightCtx, sliderDefs) {
     });
     ctx.meshBtns["femaleFace"] = bFemaleFace; btnGrid3.addControl(bFemaleFace);
     panel.addControl(btnGrid3);
+
+    // ── Light-plane visibility toggle ───────────────────────────
+    var planeVisible = true;
+    var btnTogglePlane = BABYLON.GUI.Button.CreateSimpleButton("btn_togglePlane", "\u2600 Hide Light Plane");
+    btnTogglePlane.height = "26px"; btnTogglePlane.width = "220px"; btnTogglePlane.fontSize = 11;
+    btnTogglePlane.color = "#ccc"; btnTogglePlane.background = "#e94560";
+    btnTogglePlane.cornerRadius = 4; btnTogglePlane.thickness = 0;
+    btnTogglePlane.paddingTop = "8px";
+    btnTogglePlane.onPointerClickObservable.add(function () {
+        planeVisible = !planeVisible;
+        lightCtx.planeAnchor.setEnabled(planeVisible);
+        btnTogglePlane.textBlock.text = planeVisible ? "\u2600 Hide Light Plane" : "\u2600 Show Light Plane";
+        btnTogglePlane.background = planeVisible ? "#e94560" : "#222244";
+    });
+    panel.addControl(btnTogglePlane);
 
     // ── Color pickers ───────────────────────────────────────────
     var makeSeparator = PaintersIllumination.makeSeparator;

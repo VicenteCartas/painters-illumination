@@ -128,7 +128,7 @@
             float depth = max(uPlaneDist - dot(vPositionW, L), 0.0);\
             float atten = 1.0 / (1.0 + uFalloff * depth * depth);\
             \
-            vec3 color = uAmbient * uAmbientIntensity\
+            vec3 color = uDiffuse * uAmbient * uAmbientIntensity\
                        + uDiffuse * uLightColor * banded * atten * uLightIntensity;\
             gl_FragColor = vec4(color, 1.0);\
         }";
@@ -192,7 +192,7 @@
                     onChange: function (v) { mat.setFloat("uLightIntensity", v); }
                 },
                 {
-                    label: "AMBIENT INTENSITY", min: 0, max: 3, value: 1,
+                    label: "AMBIENT INTENSITY", min: 0, max: 10, value: 1,
                     format: function (v) { return v.toFixed(2); },
                     onChange: function (v) { mat.setFloat("uAmbientIntensity", v); }
                 }

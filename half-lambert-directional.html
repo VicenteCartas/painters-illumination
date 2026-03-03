@@ -99,7 +99,7 @@
             float NdotL   = dot(N, L);\
             float diffuse = max((NdotL + uWrap) / (1.0 + uWrap), 0.0);\
             \
-            vec3 color = uAmbient * uAmbientIntensity\
+            vec3 color = uDiffuse * uAmbient * uAmbientIntensity\
                        + uDiffuse * uLightColor * diffuse * uLightIntensity;\
             gl_FragColor = vec4(color, 1.0);\
         }";
@@ -141,7 +141,7 @@
                     onChange: function (v) { mat.setFloat("uLightIntensity", v); }
                 },
                 {
-                    label: "AMBIENT INTENSITY", min: 0, max: 3, value: 1,
+                    label: "AMBIENT INTENSITY", min: 0, max: 10, value: 1,
                     format: function (v) { return v.toFixed(2); },
                     onChange: function (v) { mat.setFloat("uAmbientIntensity", v); }
                 }
